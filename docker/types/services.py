@@ -1,6 +1,7 @@
 import six
 
 from .. import errors
+from ..constants import IS_WINDOWS_PLATFORM
 from ..utils import format_environment, split_command
 
 
@@ -19,7 +20,7 @@ class TaskTemplate(dict):
           individual container created as part of the service.
         restart_policy (RestartPolicy): Specification for the restart policy
           which applies to containers created as part of this service.
-        placement (list): A list of constraints.
+        placement (:py:class:`list`): A list of constraints.
     """
     def __init__(self, container_spec, resources=None, restart_policy=None,
                  placement=None, log_driver=None):
@@ -61,16 +62,16 @@ class ContainerSpec(dict):
 
         image (string): The image name to use for the container.
         command (string or list):  The command to be run in the image.
-        args (list): Arguments to the command.
+        args (:py:class:`list`): Arguments to the command.
         env (dict): Environment variables.
         dir (string): The working directory for commands to run in.
         user (string): The user inside the container.
         labels (dict): A map of labels to associate with the service.
-        mounts (list): A list of specifications for mounts to be added to
-          containers created as part of the service. See the
-          :py:class:`~docker.types.Mount` class for details.
+        mounts (:py:class:`list`): A list of specifications for mounts to be
+            added to containers created as part of the service. See the
+            :py:class:`~docker.types.Mount` class for details.
         stop_grace_period (int): Amount of time to wait for the container to
-          terminate before forcefully killing it.
+            terminate before forcefully killing it.
     """
     def __init__(self, image, command=None, args=None, env=None, workdir=None,
                  user=None, labels=None, mounts=None, stop_grace_period=None):
@@ -105,7 +106,7 @@ class ContainerSpec(dict):
 class Mount(dict):
     """
     Describes a mounted folder's configuration inside a container. A list of
-    ``Mount``s would be used as part of a
+    :py:class:`Mount`s would be used as part of a
     :py:class:`~docker.types.ContainerSpec`.
 
     Args:
@@ -131,10 +132,11 @@ class Mount(dict):
         self['Target'] = target
         self['Source'] = source
         if type not in ('bind', 'volume'):
-            raise errors.DockerError(
+            raise errors.InvalidArgument(
                 'Only acceptable mount types are `bind` and `volume`.'
             )
         self['Type'] = type
+        self['ReadOnly'] = read_only
 
         if type == 'bind':
             if propagation is not None:
@@ -142,7 +144,7 @@ class Mount(dict):
                     'Propagation': propagation
                 }
             if any([labels, driver_config, no_copy]):
-                raise errors.DockerError(
+                raise errors.InvalidArgument(
                     'Mount type is binding but volume options have been '
                     'provided.'
                 )
@@ -157,7 +159,7 @@ class Mount(dict):
             if volume_opts:
                 self['VolumeOptions'] = volume_opts
             if propagation:
-                raise errors.DockerError(
+                raise errors.InvalidArgument(
                     'Mount type is volume but `propagation` argument has been '
                     'provided.'
                 )
@@ -166,16 +168,25 @@ class Mount(dict):
     def parse_mount_string(cls, string):
         parts = string.split(':')
         if len(parts) > 3:
-            raise errors.DockerError(
+            raise errors.InvalidArgument(
                 'Invalid mount format "{0}"'.format(string)
             )
         if len(parts) == 1:
-            return cls(target=parts[0])
+            return cls(target=parts[0], source=None)
         else:
             target = parts[1]
             source = parts[0]
-            read_only = not (len(parts) == 3 or parts[2] == 'ro')
-            return cls(target, source, read_only=read_only)
+            mount_type = 'volume'
+            if source.startswith('/') or (
+                IS_WINDOWS_PLATFORM and source[0].isalpha() and
+                source[1] == ':'
+            ):
+                # FIXME: That windows condition will fail earlier since we
+                # split on ':'. We should look into doing a smarter split
+                # if we detect we are on Windows.
+                mount_type = 'bind'
+            read_only = not (len(parts) == 2 or parts[2] == 'rw')
+            return cls(target, source, read_only=read_only, type=mount_type)
 
 
 class Resources(dict):
@@ -228,7 +239,7 @@ class UpdateConfig(dict):
         if delay is not None:
             self['Delay'] = delay
         if failure_action not in ('pause', 'continue'):
-            raise errors.DockerError(
+            raise errors.InvalidArgument(
                 'failure_action must be either `pause` or `continue`.'
             )
         self['FailureAction'] = failure_action
@@ -337,3 +348,38 @@ def convert_service_ports(ports):
 
         result.append(port_spec)
     return result
+
+
+class ServiceMode(dict):
+    """
+        Indicate whether a service should be deployed as a replicated or global
+        service, and associated parameters
+
+        Args:
+            mode (string): Can be either ``replicated`` or ``global``
+            replicas (int): Number of replicas. For replicated services only.
+    """
+    def __init__(self, mode, replicas=None):
+        if mode not in ('replicated', 'global'):
+            raise errors.InvalidArgument(
+                'mode must be either "replicated" or "global"'
+            )
+        if mode != 'replicated' and replicas is not None:
+            raise errors.InvalidArgument(
+                'replicas can only be used for replicated mode'
+            )
+        self[mode] = {}
+        if replicas:
+            self[mode]['Replicas'] = replicas
+
+    @property
+    def mode(self):
+        if 'global' in self:
+            return 'global'
+        return 'replicated'
+
+    @property
+    def replicas(self):
+        if self.mode != 'replicated':
+            return None
+        return self['replicated'].get('Replicas')
